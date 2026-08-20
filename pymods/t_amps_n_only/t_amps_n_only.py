@@ -26,11 +26,6 @@ def t_amps_n_only(self, i_idx, j_idx, lagr_multipliers_i, lagr_multipliers_j, t_
     sum_over_Ki_not_I_n = 0
     sum_over_Kj_not_J_n = 0
     sum_pieces_IJAB = 0
-    lagr_dot_gradient_vir_ni
-    lagr_dot_gradient_vir_nj
-    lagr_dot_gradient_occ_ni
-    lagr_dot_gradient_occ_nj
-    total_dot_product_of_lm_and_grad
 
 
 

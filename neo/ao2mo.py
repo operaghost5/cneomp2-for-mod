@@ -4,7 +4,52 @@
 import pyscf.gto
 import numpy
 import pyscf.ao2mo as ao2mo
+from pyscf import gto
+from pyscf.ao2mo import _ao2mo
 from timeit import default_timer as timer
+
+
+def _cross_ovov(mol1, mol2, mo1, mo2, nocc1, nocc2):
+    '''(o1 v1 | o2 v2) MO Coulomb integrals between two fragments.
+
+    Only the cross AO block (mol1 mol1 | mol2 mol2) is computed, with 4-fold
+    permutational symmetry, instead of the full 2-electron integral tensor of
+    the combined molecule.  For fragments with n1 and n2 AOs this reduces the
+    integral storage from (n1+n2)^4/8 to n1^2 n2^2/4 doubles and skips the
+    (11|11), (22|22), and (11|12)-type integral blocks entirely, which is
+    both much faster and the dominant memory saving of the CNEO-MP2 setup
+    stage.
+
+    Returns a 2D array of shape (nocc1*nvir1, nocc2*nvir2), the same layout
+    that ao2mo.incore.general produced in the original implementation.
+    '''
+    atm, bas, env = gto.conc_env(mol1._atm, mol1._bas, mol1._env,
+                                 mol2._atm, mol2._bas, mol2._env)
+    intor_name = 'int2e_sph'
+    if getattr(mol1, 'cart', False):
+        intor_name = 'int2e_cart'
+    nbas1 = mol1._bas.shape[0]
+    nbas2 = mol2._bas.shape[0]
+    # Packed cross block: shape (n1*(n1+1)/2, n2*(n2+1)/2)
+    eri = gto.moleintor.getints(intor_name, atm, bas, env,
+                                shls_slice=(0, nbas1, 0, nbas1,
+                                            nbas1, nbas1 + nbas2,
+                                            nbas1, nbas1 + nbas2),
+                                aosym='s4')
+
+    mo1 = numpy.asarray(mo1, order='F')
+    mo2 = numpy.asarray(mo2, order='F')
+    tot1 = mo1.shape[1]
+    tot2 = mo2.shape[1]
+
+    # Half-transform the (packed) fragment-2 pair index: -> (npair1, o2*v2)
+    half = _ao2mo.nr_e2(eri, mo2, (0, nocc2, nocc2, tot2), 's4', 's1')
+    del eri
+    # Transform the (packed) fragment-1 pair index: -> (o2*v2, o1*v1)
+    half = numpy.ascontiguousarray(half.T)
+    out = _ao2mo.nr_e2(half, mo1, (0, nocc1, nocc1, tot1), 's4', 's1')
+    del half
+    return numpy.ascontiguousarray(out.T)
 
 def ep_setup(mf, mf2,  i=0, j=0, ep=True):
 
@@ -103,64 +148,45 @@ def pp_full(mf, mf2, i=0, j=0):
 
 #end2
 
-def ep_ovov(mf,mf2, i=0):
+def ep_ovov(mf, mf2, i=0):
+    '''(ia|IA) electron-nucleus MO integrals, scaled by the nuclear charge.
 
-    eri, mo_coeff_tot = ep_setup(mf, mf2, i)
+    Only the cross (elec elec|nuc nuc) AO block is computed and transformed
+    (see _cross_ovov); the result is identical to transforming the full
+    combined-molecule integrals as done previously, at a fraction of the
+    memory and time.'''
 
     e_nocc = mf.mf_elec.mo_coeff[:,mf.mf_elec.mo_occ>0].shape[1]
-    e_tot  = mf.mf_elec.mo_coeff[0,:].shape[0]
-    e_nvir = e_tot - e_nocc
-
     p_nocc = mf.mf_nuc[i].mo_coeff[:,mf.mf_nuc[i].mo_occ>0].shape[1]
-    p_tot  = mf.mf_nuc[i].mo_coeff[0,:].shape[0]
-    p_nvir = p_tot - p_nocc
-    
-    
-    co_e= mo_coeff_tot[:,:e_nocc]
-    cv_e= mo_coeff_tot[:,e_nocc:e_tot]
-
-    co_n=mo_coeff_tot[:,e_tot:e_tot+p_nocc]
-    cv_n=mo_coeff_tot[:,e_tot+p_nocc:]
 
     charge_i_ep =  mf.mol.nuc[i].super_mol.atom_charge(mf.mol.nuc[i].atom_index)
 
-    start = timer()
-    eri_ep = ao2mo.incore.general(eri,(co_e,cv_e,co_n,cv_n), compact=False)
-    finish = timer()
+    eri_ep = _cross_ovov(mf.mol.elec, mf.mol.nuc[i],
+                         mf2.mf_elec.mo_coeff, mf2.mf_nuc[i].mo_coeff,
+                         e_nocc, p_nocc)
 
-#    print('real time for ovov integral transformation = ',finish-start)
-    scaled_eri_ep = eri_ep*(charge_i_ep)
-    return scaled_eri_ep
+    eri_ep *= charge_i_ep
+    return eri_ep
 
 
 def pp_ovov(mf, mf2, i=0, j=0):
+    '''(IA|JB) nucleus-nucleus MO integrals, scaled by the nuclear charges.
 
-    eri, mo_coeff_tot_p = pp_setup(mf,mf2,i,j,True)
+    Only the cross (nuc_i nuc_i|nuc_j nuc_j) AO block is computed and
+    transformed (see _cross_ovov).'''
 
     p_nocc_i = mf.mf_nuc[i].mo_coeff[:,mf.mf_nuc[i].mo_occ>0].shape[1]
-    p_tot_i = mf.mf_nuc[i].mo_coeff[0,:].shape[0]
-    p_nvir_i = p_tot_i - p_nocc_i
+    p_nocc_j = mf.mf_nuc[j].mo_coeff[:,mf.mf_nuc[j].mo_occ>0].shape[1]
 
     charge_i_pp = mf.mol.nuc[i].super_mol.atom_charge(mf.mol.nuc[i].atom_index)
+    charge_j_pp = mf.mol.nuc[j].super_mol.atom_charge(mf.mol.nuc[j].atom_index)
 
-    p_nocc_j = mf.mf_nuc[j].mo_coeff[:,mf.mf_nuc[j].mo_occ>0].shape[1]
-    p_tot_j = mf.mf_nuc[j].mo_coeff[0,:].shape[0]
-    p_nvir_j = p_tot_j - p_nocc_j
+    eri_pp = _cross_ovov(mf.mol.nuc[i], mf.mol.nuc[j],
+                         mf2.mf_nuc[i].mo_coeff, mf2.mf_nuc[j].mo_coeff,
+                         p_nocc_i, p_nocc_j)
 
-    charge_j_pp = mf.mol.nuc[j].super_mol.atom_charge(mf.mol.nuc[j].atom_index) 
-
-    co_ni = mo_coeff_tot_p[:,:p_nocc_i]
-    cv_ni = mo_coeff_tot_p[:,p_nocc_i:p_tot_i]
-   
-    co_nj = mo_coeff_tot_p[:,p_tot_i:p_tot_i+p_nocc_j]
-    cv_nj = mo_coeff_tot_p[:,p_tot_i+p_nocc_j:]
-    
-    start = timer()
-    eri_pp = ao2mo.incore.general(eri,(co_ni,cv_ni,co_nj,cv_nj), compact=False)
-    scaled_eri_pp = eri_pp*(charge_i_pp*charge_j_pp)
-    finish = timer()
-
-    return scaled_eri_pp
+    eri_pp *= (charge_i_pp*charge_j_pp)
+    return eri_pp
 
 
 

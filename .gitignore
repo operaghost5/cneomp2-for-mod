@@ -1,0 +1,12 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Cython / C build artifacts
+*.so
+*.o
+*.c
+build/
+
+# Saved amplitude checkpoints
+*.npy

@@ -35,9 +35,6 @@ def mp2_density_one(self, i_idx, T_n, L_n, T_en, L_en):
     p_nocc_i = int(self.num_ovt[i_idx][0,0])
     p_nvir_i  = int(self.num_ovt[i_idx][0,1])
     p_tot_i = int(self.num_ovt[i_idx][0,2])
-    p_nocc_j
-    p_nvir_j
-    p_tot_j 
     
     Sum_over_iIa = 0
     Sum_over_aAi = 0
