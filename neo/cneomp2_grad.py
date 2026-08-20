@@ -197,6 +197,9 @@ class Gradients(lib.StreamObject):
         self.max_t_cycles = 500
         self.de = None
         self.e2 = None   # correlation energy consistent with the gradient
+        # debug: weights (w_ee, w_en, w_nn) multiplying the density/2PDM
+        # contributions of each correlation class in the gradient assembly
+        self._class_mask = (1.0, 1.0, 1.0)
 
     #---------------------------------------------------------------------
     # amplitude solution at fixed multipliers
@@ -311,10 +314,12 @@ class Gradients(lib.StreamObject):
         for i in range(nuc_num):
             for j in range(nuc_num):
                 TNIMO_l[i][j] = _l_view(TNIMO_t[i][j])
-        e2 = (Hylleraas_energy_e(mp2, t_e, l_e, TEIMO_t, TEIMO_l, ncF_eMO)
-              + Hylleraas_energy_en(mp2, t_en, l_en, TPIMO_t, TPIMO_l,
+        e2_e = Hylleraas_energy_e(mp2, t_e, l_e, TEIMO_t, TEIMO_l, ncF_eMO)
+        e2_en = Hylleraas_energy_en(mp2, t_en, l_en, TPIMO_t, TPIMO_l,
                                     ncF_eMO, ncF_nMO)
-              + Hylleraas_energy_n(mp2, t_n, l_n, TNIMO_t, TNIMO_l, ncF_nMO))
+        e2_n = Hylleraas_energy_n(mp2, t_n, l_n, TNIMO_t, TNIMO_l, ncF_nMO)
+        e2 = e2_e + e2_en + e2_n
+        self.e2_parts = (e2_e, e2_en, e2_n)
 
         return dict(ncF_eMO=ncF_eMO, ncF_nMO=ncF_nMO, TEIMO_t=TEIMO_t,
                     TPIMO_t=TPIMO_t, TNIMO_t=TNIMO_t, t_e=t_e, t_en=t_en,
@@ -326,6 +331,7 @@ class Gradients(lib.StreamObject):
     #---------------------------------------------------------------------
     def _densities(self, ing):
         mp2 = self.mp2
+        w_ee, w_en, w_nn = self._class_mask
         nuc_num = len(mp2.con.mol.nuc)
         e_nocc, e_nvir = mp2.e_nocc, mp2.e_nvir
         t, l = ing['t_e'], ing['l_e']
@@ -352,31 +358,56 @@ class Gradients(lib.StreamObject):
                                       numpy.zeros_like(ing['ncF_eMO']))
         assert abs(einsum('iajb,iajb->', G_ee, g) - gt_check) < 1e-8
 
+        D_e_vv_ee = D_e_vv.copy()
+        D_e_oo_ee = D_e_oo.copy()
+        D_e_vv_en = numpy.zeros_like(D_e_vv)
+        D_e_oo_en = numpy.zeros_like(D_e_oo)
         D_n_vv = []
         D_n_oo = []
         G_en = []
         for j in range(nuc_num):
             tj, lj = ing['t_en'][j], ing['l_en'][j]
             # e-n contributions to the electronic density
-            D_e_vv += 2.0 * einsum('aiAI,icIA->ac', lj, tj)
-            D_e_oo += -2.0 * einsum('akAI,iaIA->ik', lj, tj)
+            D_e_vv_en += 2.0 * einsum('aiAI,icIA->ac', lj, tj)
+            D_e_oo_en += -2.0 * einsum('akAI,iaIA->ik', lj, tj)
             # e-n contributions to the nuclear density
             D_n_vv.append(2.0 * einsum('aiAI,iaIC->AC', lj, tj))
             D_n_oo.append(-2.0 * einsum('aiAK,iaIA->IK', lj, tj))
             # Gamma_en: J_en g-terms are -(gt+gl) = sum g_iaIA (-4 t_iaIA)
             G_en.append(-4.0 * tj)
+        D_e_vv = D_e_vv_ee + D_e_vv_en
+        D_e_oo = D_e_oo_ee + D_e_oo_en
+        D_n_vv_en = [x.copy() for x in D_n_vv]
+        D_n_oo_en = [x.copy() for x in D_n_oo]
 
         G_nn = numpy.empty((nuc_num, nuc_num), dtype=object)
+        D_n_vv_nn = [numpy.zeros_like(x) for x in D_n_vv]
+        D_n_oo_nn = [numpy.zeros_like(x) for x in D_n_oo]
         for i in range(nuc_num):
             for j in range(i):
                 tij, lij = ing['t_n'][i][j], ing['l_n'][i][j]
-                D_n_vv[i] += einsum('AIBJ,ICJB->AC', lij, tij)
-                D_n_vv[j] += einsum('AIBJ,IAJC->BC', lij, tij)
-                D_n_oo[i] += -einsum('AKBJ,IAJB->IK', lij, tij)
-                D_n_oo[j] += -einsum('AIBK,IAJB->JK', lij, tij)
+                D_n_vv_nn[i] += einsum('AIBJ,ICJB->AC', lij, tij)
+                D_n_vv_nn[j] += einsum('AIBJ,IAJC->BC', lij, tij)
+                D_n_oo_nn[i] += -einsum('AKBJ,IAJB->IK', lij, tij)
+                D_n_oo_nn[j] += -einsum('AIBK,IAJB->JK', lij, tij)
                 # J_n g-terms are +(gt+gl) = sum g_IAJB (2 t_IAJB)
                 G_nn[i, j] = 2.0 * tij
+        for j in range(nuc_num):
+            D_n_vv[j] += D_n_vv_nn[j]
+            D_n_oo[j] += D_n_oo_nn[j]
 
+        if (w_ee, w_en, w_nn) != (1.0, 1.0, 1.0):
+            # rebuild with weights (debug decomposition)
+            D_e_vv = w_ee * D_e_vv_ee + w_en * D_e_vv_en
+            D_e_oo = w_ee * D_e_oo_ee + w_en * D_e_oo_en
+            for j in range(nuc_num):
+                D_n_vv[j] = w_en * D_n_vv_en[j] + w_nn * D_n_vv_nn[j]
+                D_n_oo[j] = w_en * D_n_oo_en[j] + w_nn * D_n_oo_nn[j]
+            G_ee = w_ee * G_ee
+            G_en = [w_en * x for x in G_en]
+            for i in range(nuc_num):
+                for j in range(i):
+                    G_nn[i, j] = w_nn * G_nn[i, j]
         return D_e_oo, D_e_vv, D_n_oo, D_n_vv, G_ee, G_en, G_nn
 
     #---------------------------------------------------------------------
