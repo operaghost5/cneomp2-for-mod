@@ -90,10 +90,37 @@ invariance argument, which does *not* hold for the correlation part -
 hence the CPHF solves above).
 
 This is a *forward-response* formulation: one constrained-CPHF solve per
-nuclear displacement (3N per gradient), reusing the Hessian machinery
-verbatim.  A single-solve Z-vector (adjoint) formulation is the natural
-future optimization; it was not needed for the molecule sizes targeted
-here, where the SCF itself dominates the wall time.
+nuclear displacement (3N per gradient).  A single-solve Z-vector (adjoint)
+formulation is the natural future optimization; it was not needed for the
+molecule sizes targeted here, where the SCF itself dominates the wall time.
+
+### How the response equations are solved (and why not neo.cphf)
+
+The right-hand sides are built with `hessian.make_h1` (verified element by
+element against finite differences of the frozen-density Fock matrices),
+but the linear equations are solved by a direct dense factorization inside
+`cneomp2_grad` rather than by `neo.cphf.solve`.  The Krylov solver in
+`neo.cphf` preconditions every row by 1/(eps_a - eps_i); for heavy quantum
+nuclei the mass-scaled nuclear orbital-energy gaps are so large that the
+nuclear-block residuals become invisibly small in the solver's convergence
+metric, and it reports convergence while the actual solution error is
+large.  On all-quantum N2/cc-pVDZ the returned first-order densities
+deviate from finite-difference density responses by up to 6% (and the
+first-order position constraint r.mo1 = 0 is violated at 5e-7), even at
+Krylov tolerance 1e-13, while the *equations themselves* are satisfied by
+the finite-difference response to 4e-8 - i.e. the equations are complete
+and correct, only the linear solve is at fault.  Systems with only light
+quantum nuclei (H, He) have small gaps and are unaffected, which is why
+H-only tests of the Hessian machinery pass.  The same false convergence
+therefore affects the analytic CNEO Hessian for heavy quantum nuclei;
+this should be reported upstream.
+
+The dense solve builds the coupled operator by batched applications of
+the (finite-difference-verified) multicomponent response function over
+unit vectors, LU-factorizes it once per gradient, and back-substitutes
+all 3N right-hand sides.  System size is n_vir^e n_occ^e + sum_I n_vir^I
++ 3 N_quantum (about 1000 for HCN/aug-cc-pVTZ), negligible next to the
+SCF.
 
 ## 3. Why the constrained-amplitude (CCD) gradient is not provided
 
