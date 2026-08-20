@@ -5,7 +5,7 @@ Electronic basis aug-cc-pVTZ; all nuclei quantum (PB4-D for H, 12s12p12d
 even-tempered for C/N).  Converges in a handful of gradient evaluations
 (2 steps from a good starting structure) to
 
-    r(H-C) = 1.0736 A,  r(C-N) = 1.1592 A,  E = -92.0870742 hartree
+    r(H-C) = 1.0734 A,  r(C-N) = 1.1591 A,  E = -92.0870743 hartree
 
 in agreement with the energy-only BFGS optimization of the constrained-
 amplitude energy (examples/hcn.aug-cc-pvtz.cneomp2.constrained.BFGS.py:
