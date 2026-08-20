@@ -66,6 +66,17 @@ class KnownValues(unittest.TestCase):
         # SCF (about 1e-9 Ha of energy noise over a 8e-4 Bohr baseline)
         self.assertLess(abs(de - de_fd).max(), 2e-6)
 
+    def test_n2_heavy_quantum_nuclei(self):
+        # regression test for the heavy-quantum-nucleus response defect:
+        # the Krylov CPHF falsely converges for heavy nuclei (see
+        # docs/cneomp2_gradient_theory.md); the dense response solve keeps
+        # the gradient at the finite-difference noise floor (~1e-6 here,
+        # set by the correlated-energy FD noise over the 8e-4 Bohr baseline)
+        atoms = [['N1', (0., 0., -1.05)], ['N2', (0., 0., 1.05)]]
+        e, de = energy_and_grad(atoms, 0, [0, 1], 'ccpvdz')
+        de_fd = fd_grad(atoms, 0, [0, 1], 'ccpvdz')
+        self.assertLess(abs(de - de_fd).max(), 3e-6)
+
     def test_ccd_gradient_raises(self):
         mol = neo.Mole()
         mol.build(atom='H1 0 0 0.37; H2 0 0 -0.37', basis='sto-3g',
