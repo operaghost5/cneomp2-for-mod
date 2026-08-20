@@ -138,16 +138,30 @@ identical, geometry optimization uses the UCD surface.
 
 ## 4. Validation (finite differences, central, Ha/Bohr)
 
-| system | basis | quantum nuclei | max |analytic - FD| (MP2 part) |
-|---|---|---|---|
-| H2 | sto-3g/pb4d | both | 9.2e-09 |
-| H2 | cc-pVDZ/pb4d | both | 1.5e-08 |
-| HF | sto-3g/pb4d | H only | 3.2e-09 |
-| HeH+ | cc-pVDZ/pb4d | both | 3.2e-08 |
+MP2-part deviation |analytic - FD| at the noise-optimal step for each
+system (all-quantum unless noted; nuclear basis pb4d for H/D, 12s12p12d
+even-tempered for heavier nuclei):
 
-(The residual differences are dominated by the finite-difference noise of
-the constrained SCF itself; the HF-part agreement of the pre-existing
-analytic SCF gradient sets the same scale.)
+| system | electronic basis | notes | max dev |
+|---|---|---|---|
+| H2 | sto-3g | | 9.2e-09 |
+| H2 | cc-pVDZ | | 1.5e-08 |
+| H2 | cc-pVTZ | electronic d shells | 1.3e-07 |
+| HF | sto-3g | quantum H only | 3.2e-09 |
+| HF | cc-pVTZ | d/f shells, classical F | 1.2e-08 |
+| HeH+ | cc-pVDZ | unequal charges, heavy He | 3.2e-08 |
+| H3+ | sto-3g | three quantum nuclei | 9.2e-09 |
+| LiH | cc-pVDZ | heavy quantum Li | 6.4e-09 |
+| N2 | cc-pVDZ | two heavy quantum nuclei | 6.2e-08 |
+| HCN | aug-cc-pVTZ | spot checks, 3 quantum nuclei | 6.8e-08 |
+
+The residual differences are dominated by the finite-difference noise of
+the constrained SCF and amplitude iterations (they scale as 1/h with the
+FD step); the HF-part agreement of the pre-existing analytic SCF gradient
+sets the same scale.  The heavy-quantum-nucleus rows require the direct
+dense response solve of Section "How the response equations are solved":
+with the Krylov solver of neo.cphf they fail at 4e-7 (LiH), 2.5e-5 (N2),
+and 1.3e-4 (HCN).
 
 geomeTRIC optimizations driven by these gradients (`neo/cneomp2_geomopt.py`)
 reproduce the energy-only optimization results; see the examples directory.
