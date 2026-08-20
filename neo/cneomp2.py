@@ -206,8 +206,9 @@ class cNEOMP2(lib.StreamObject):
         #-----------------------------------------------------------------------
         # [2.2] Convergence criteria
         #-----------------------------------------------------------------------
-        t_conv_tol = 10**(-8)
-        e_conv_tol = 10**(-8)
+        t_conv_tol = getattr(self, 't_conv_tol', 1e-8)
+        e_conv_tol = getattr(self, 'e_conv_tol', 1e-8)
+        lagr_tol = getattr(self, 'lagr_tol', 1e-5)
 
         #-----------------------------------------------------------------------
         # [2.3] Construction of the noncanonical NEO Fock matrices (Eqs. 23/24)
@@ -517,9 +518,10 @@ class cNEOMP2(lib.StreamObject):
                     constraint_opt[i] = scipy.optimize.root(
                         Lagrangian_constraint, self.try_lagr[i].flatten(),
                         args=(self, i, self.t_nuc, self.t_elecnuc, self.posn_ints),
-                        method='lm', jac=False, tol=1e-5,
-                        options={'col_deriv': True, 'ftol': 1e-5, 'xtol': 1e-5,
-                                 'gtol': 1e-5, 'maxiter': 1000})
+                        method='lm', jac=False, tol=lagr_tol,
+                        options={'col_deriv': True, 'ftol': lagr_tol,
+                                 'xtol': lagr_tol, 'gtol': lagr_tol,
+                                 'maxiter': 1000})
                     print(asterisk)
                     print(constraint_opt[i].status)
                     print(constraint_opt[i].message)

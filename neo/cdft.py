@@ -35,6 +35,10 @@ class CDFT(HF): #class CDFT(KS):
     def __init__(self, mol, **kwargs):
         HF.__init__(self, mol, **kwargs) #KS.__init__(self, mol, **kwargs)
         self.f = numpy.zeros((mol.natm, 3))
+        # no electron-proton correlation functional in the HF-based CDFT;
+        # the attribute is expected by the gradient and hessian modules
+        if not hasattr(self, 'epc'):
+            self.epc = None
 
         # set up the Hamiltonian for each quantum nuclei in cNEO
         for i in range(len(self.mol.nuc)):
