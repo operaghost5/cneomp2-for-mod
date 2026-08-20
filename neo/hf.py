@@ -423,6 +423,18 @@ def get_hcore_positron(mol, mf_positron, mol_elec=None, dm_elec=None,
 def get_veff_nuc_bare(mol):
     return numpy.zeros((mol.nao_nr(), mol.nao_nr()))
 
+def _get_err_vec_compat(s1e, dm, f):
+    '''DIIS error vector SDF - FDS for a list of different-size component
+    matrices (electronic + each quantum nucleus).  Older PySCF versions
+    supported lists directly in scf.diis.get_err_vec; newer versions do not,
+    so this local helper keeps the multicomponent DIIS working.'''
+    if isinstance(f, (list, tuple)):
+        return numpy.concatenate([_get_err_vec_compat(s1e[i], dm[i], f[i])
+                                  for i in range(len(f))])
+    sdf = s1e @ dm @ f
+    return (sdf.conj().T - sdf).ravel()
+
+
 def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
              diis_start_cycle=None, level_shift_factor=None, damp_factor=None,
              diis_pos='both', diis_type=3):
@@ -564,11 +576,11 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
             f_ravel = numpy.concatenate(f, axis=None)
             if diis_type == 1:
                 f0_ravel = numpy.concatenate(f0, axis=None)
-                f_ravel = diis.update(f0_ravel, scf.diis.get_err_vec(s1e, dm, f))
+                f_ravel = diis.update(f0_ravel, _get_err_vec_compat(s1e, dm, f))
             elif diis_type == 2:
                 f_ravel = diis.update(f_ravel)
             elif diis_type == 3:
-                f_ravel = diis.update(f_ravel, scf.diis.get_err_vec(s1e, dm, f))
+                f_ravel = diis.update(f_ravel, _get_err_vec_compat(s1e, dm, f))
             else:
                 print("\nWARN: Unknow CDFT DIIS type, NO DIIS IS USED!!!\n")
             f = []
