@@ -540,10 +540,17 @@ class Gradients(lib.StreamObject):
         # =====================================================================
         # 4) CPHF response: mo1 for every displacement, then assemble the
         #    rotation and Fock-response terms
+        #
+        # NOTE: the coupled response equations are solved by a direct dense
+        # factorization (_solve_response_direct) instead of the Krylov solver
+        # in neo.cphf: for heavy quantum nuclei the 1/(eps_a - eps_i)
+        # preconditioning of that solver makes the nuclear-block residuals
+        # invisibly small in its convergence metric, and it reports
+        # convergence while the actual solution error is ~1e-4 (verified
+        # against finite-difference density responses on all-quantum N2).
         # =====================================================================
-        mo1s_e, e1s_e, mo1s_n, f1s_n = neo_hessian.solve_mo1_rks(
-            con, h1ao_e, h1ao_n, atmlst=list(atmlst),
-            max_memory=4000, verbose=self.verbose)
+        mo1s_e, mo1s_n, f1s_n = self._solve_response_direct(
+            h1ao_e, h1ao_n, atmlst=list(atmlst))
 
         s_e = con.mf_elec.get_ovlp()
         s1a = -mol.elec.intor('int1e_ipovlp', comp=3)
@@ -586,6 +593,197 @@ class Gradients(lib.StreamObject):
 
         self.de = de
         return de
+
+    #---------------------------------------------------------------------
+    # direct (dense) solution of the coupled CNEO response equations
+    #---------------------------------------------------------------------
+    def _solve_response_direct(self, h1ao_e, h1ao_n, atmlst):
+        '''Solve the coupled first-order CNEO-HF equations
+
+            (eps_a - eps_i) U^e_ai + [h1_e - S1 eps_i + v_e(dm1)]_ai = 0
+            (eps_A - eps_I) U^n_AI + [h1_n + v_n(dm1)]_AI
+                                   + sum_x f1_x <A|(r-<r>)_x|I>       = 0
+            sum_AI <A|(r-<r>)_x|I> U^n_AI                             = 0
+
+        for every displacement, by building the dense linear system through
+        applications of the (finite-difference-verified) response function
+        and factorizing it once.  Returns mo1 in AO basis (nao x nocc, with
+        the -S1_oo/2 occupied-block convention) for the electrons and each
+        quantum nucleus, plus the multiplier responses.
+        '''
+        mp2 = self.mp2
+        con = mp2.con
+        mol = con.mol
+        nuc_num = mol.nuc_num
+        log = logger.new_logger(self, self.verbose)
+        t0 = (logger.process_clock(), logger.perf_counter())
+
+        mf_e = con.mf_elec
+        c_e = mf_e.mo_coeff
+        occ_e = mf_e.mo_occ > 0
+        co_e = c_e[:, occ_e]
+        cv_e = c_e[:, ~occ_e]
+        eo_e = mf_e.mo_energy[occ_e]
+        ev_e = mf_e.mo_energy[~occ_e]
+        nocc_e, nvir_e = co_e.shape[1], cv_e.shape[1]
+
+        c_n, co_n, cv_n, ev_n, eo_n, rt_vo = [], [], [], [], [], []
+        for i in range(nuc_num):
+            mf = con.mf_nuc[i]
+            occ = mf.mo_occ > 0
+            c_n.append(mf.mo_coeff)
+            co_n.append(mf.mo_coeff[:, occ])
+            cv_n.append(mf.mo_coeff[:, ~occ])
+            eo_n.append(mf.mo_energy[occ])
+            ev_n.append(mf.mo_energy[~occ])
+            # <A|(r - <r>)_x|I> in MO, shape (3, nvir, nocc)
+            rt_vo.append(einsum('xmn,ma,ni->xai', mf.int1e_r,
+                                cv_n[i], co_n[i]))
+
+        sizes = [nvir_e * nocc_e]
+        for i in range(nuc_num):
+            sizes.append(cv_n[i].shape[1] * co_n[i].shape[1])
+        sizes.append(3 * nuc_num)
+        offs = numpy.cumsum([0] + sizes)
+        nvar = offs[-1]
+
+        vresp = con.gen_response(hermi=1)
+
+        def apply_op(x, dm1e_oo=None):
+            '''Left-hand side applied to x = (U^e_vo, U^n_vo..., f1...).
+            dm1e_oo: optional occupied-block AO density (from -S1_oo/2),
+            treated as part of the density response.'''
+            u_e = x[offs[0]:offs[1]].reshape(nvir_e, nocc_e)
+            u_n = [x[offs[1+i]:offs[2+i]].reshape(cv_n[i].shape[1],
+                                                  co_n[i].shape[1])
+                   for i in range(nuc_num)]
+            f1 = x[offs[1+nuc_num]:].reshape(nuc_num, 3)
+
+            dm_e = cv_e @ u_e @ co_e.T * 2.0
+            dm_e = dm_e + dm_e.T
+            if dm1e_oo is not None:
+                dm_e = dm_e + dm1e_oo
+            dm_n = []
+            for i in range(nuc_num):
+                d = cv_n[i] @ u_n[i] @ co_n[i].T
+                dm_n.append(d + d.T)
+            v1e, v1n = vresp(dm_e[None], dm_e[None] * 0.5,
+                             [d[None] * 0.5 for d in dm_n])
+            v1e = numpy.asarray(v1e).reshape(dm_e.shape)
+            v1n = [numpy.asarray(v).reshape(dm_n[i].shape)
+                   for i, v in enumerate(v1n)]
+
+            out = numpy.empty_like(x)
+            r_e = (ev_e[:, None] - eo_e) * u_e + cv_e.T @ v1e @ co_e
+            out[offs[0]:offs[1]] = r_e.ravel()
+            for i in range(nuc_num):
+                r_n = (ev_n[i][:, None] - eo_n[i]) * u_n[i] \
+                      + cv_n[i].T @ v1n[i] @ co_n[i] \
+                      + einsum('x,xai->ai', f1[i], rt_vo[i])
+                out[offs[1+i]:offs[2+i]] = r_n.ravel()
+            cons = numpy.empty((nuc_num, 3))
+            for i in range(nuc_num):
+                cons[i] = einsum('xai,ai->x', rt_vo[i], u_n[i])
+            out[offs[1+nuc_num]:] = cons.ravel()
+            return out
+
+        def apply_op_batch(X):
+            '''apply_op for a batch of vectors X (nvec, nvar), using the
+            batched density response for efficiency.'''
+            nvec = X.shape[0]
+            u_e = X[:, offs[0]:offs[1]].reshape(nvec, nvir_e, nocc_e)
+            u_n = [X[:, offs[1+i]:offs[2+i]].reshape(
+                       nvec, cv_n[i].shape[1], co_n[i].shape[1])
+                   for i in range(nuc_num)]
+            f1 = X[:, offs[1+nuc_num]:].reshape(nvec, nuc_num, 3)
+
+            dm_e = einsum('ma,kai,ni->kmn', cv_e, u_e, co_e) * 2.0
+            dm_e = dm_e + dm_e.transpose(0, 2, 1)
+            dm_n = []
+            for i in range(nuc_num):
+                d = einsum('ma,kai,ni->kmn', cv_n[i], u_n[i], co_n[i])
+                dm_n.append(d + d.transpose(0, 2, 1))
+            v1e, v1n = vresp(dm_e, dm_e * 0.5, [d * 0.5 for d in dm_n])
+            v1e = numpy.asarray(v1e).reshape(dm_e.shape)
+            v1n = [numpy.asarray(v).reshape(dm_n[i].shape)
+                   for i, v in enumerate(v1n)]
+
+            out = numpy.empty_like(X)
+            r_e = (ev_e[None, :, None] - eo_e[None, None, :]) * u_e \
+                  + einsum('ma,kmn,ni->kai', cv_e, v1e, co_e)
+            out[:, offs[0]:offs[1]] = r_e.reshape(nvec, -1)
+            for i in range(nuc_num):
+                r_n = (ev_n[i][None, :, None] - eo_n[i][None, None, :]) * u_n[i] \
+                      + einsum('ma,kmn,ni->kai', cv_n[i], v1n[i], co_n[i]) \
+                      + einsum('kx,xai->kai', f1[:, i], rt_vo[i])
+                out[:, offs[1+i]:offs[2+i]] = r_n.reshape(nvec, -1)
+            cons = numpy.empty((nvec, nuc_num, 3))
+            for i in range(nuc_num):
+                cons[:, i] = einsum('xai,kai->kx', rt_vo[i], u_n[i])
+            out[:, offs[1+nuc_num]:] = cons.reshape(nvec, -1)
+            return out
+
+        # dense operator matrix (the response operator is
+        # perturbation-independent, so this is done once per gradient)
+        A = numpy.empty((nvar, nvar))
+        blk = 32
+        for k0 in range(0, nvar, blk):
+            k1 = min(k0 + blk, nvar)
+            E = numpy.zeros((k1 - k0, nvar))
+            E[numpy.arange(k1 - k0), numpy.arange(k0, k1)] = 1.0
+            A[:, k0:k1] = apply_op_batch(E).T
+        log.timer('dense CNEO response operator (%d x %d)' % (nvar, nvar), *t0)
+        from scipy.linalg import lu_factor, lu_solve
+        lu = lu_factor(A)
+
+        s_e = mf_e.get_ovlp()
+        s1a = -mol.elec.intor('int1e_ipovlp', comp=3)
+        aoslices_e = mol.elec.aoslice_by_atom()
+
+        mo1s_e = [None] * mol.natm
+        mo1s_n = [None] * mol.natm
+        f1s_n = [None] * mol.natm
+        for ia in atmlst:
+            p0, p1 = aoslices_e[ia, 2:]
+            s1ao = numpy.zeros((3,) + s_e.shape)
+            s1ao[:, p0:p1] += s1a[:, p0:p1]
+            s1ao[:, :, p0:p1] += s1a[:, p0:p1].transpose(0, 2, 1)
+
+            mo1e_x = numpy.empty((3, c_e.shape[0], nocc_e))
+            mo1n_x = [numpy.empty((3, c_n[i].shape[0], co_n[i].shape[1]))
+                      for i in range(nuc_num)]
+            f1n_x = numpy.empty((3, nuc_num, 3))
+            for x in range(3):
+                s1oo = co_e.T @ s1ao[x] @ co_e
+                dm1e_oo = -co_e @ s1oo @ co_e.T * 2.0   # 2 for double occ
+                # RHS: minus the U-independent parts of the equations
+                rhs = numpy.zeros(nvar)
+                h1vo = cv_e.T @ h1ao_e[ia][x] @ co_e \
+                       - (cv_e.T @ s1ao[x] @ co_e) * eo_e
+                base = apply_op(numpy.zeros(nvar), dm1e_oo=dm1e_oo)
+                rhs[offs[0]:offs[1]] = -(h1vo.ravel() + base[offs[0]:offs[1]])
+                for i in range(nuc_num):
+                    h1vo_n = cv_n[i].T @ h1ao_n[ia][i][x] @ co_n[i]
+                    rhs[offs[1+i]:offs[2+i]] = -(h1vo_n.ravel()
+                                                 + base[offs[1+i]:offs[2+i]])
+                rhs[offs[1+nuc_num]:] = 0.0
+                sol = lu_solve(lu, rhs)
+
+                u_e = sol[offs[0]:offs[1]].reshape(nvir_e, nocc_e)
+                mo1_mo = numpy.zeros((c_e.shape[1], nocc_e))
+                mo1_mo[:nocc_e] = -0.5 * s1oo
+                mo1_mo[nocc_e:] = u_e
+                mo1e_x[x] = c_e @ mo1_mo
+                for i in range(nuc_num):
+                    u_n = sol[offs[1+i]:offs[2+i]].reshape(
+                        cv_n[i].shape[1], co_n[i].shape[1])
+                    mo1n_x[i][x] = cv_n[i] @ u_n
+                f1n_x[x] = sol[offs[1+nuc_num]:].reshape(nuc_num, 3)
+            mo1s_e[ia] = mo1e_x
+            mo1s_n[ia] = [mo1n_x[i] for i in range(nuc_num)]
+            f1s_n[ia] = [f1n_x[:, i] for i in range(nuc_num)]
+        log.timer('CNEO response solutions', *t0)
+        return mo1s_e, mo1s_n, f1s_n
 
     @staticmethod
     def _full_U(u_occ, s1mo, nocc):
