@@ -1,0 +1,82 @@
+"""HNNH -- NEO-CCSD/DF geometry optimization, aug-cc-pvdz / pb4f1.
+
+System HNNH (XNNX, X = H) from Tucker & Brorsen, "An Analytic Nuclear Energy Gradient
+for Multicomponent CCSD", J. Chem. Theory Comput.,
+doi:10.1021/acs.jctc.6c01090; starting geometry from the mc_coupled_cluster campaign set (df_gradient/cluster/molecules.py); the paper and SI report only optimized internal coordinates for this system.
+
+Every hydrogen nucleus is treated quantum mechanically (deuterium is the
+pyscf NEO symbol 'H+'; the pb4f1 exponents follow the nuclear mass).
+Density fitting follows the manual's recommendation (production/docs/
+manual.md): Cfit and JKfit one zeta above the orbital basis, protonic aux
+via the Pavosevic recipe. geomeTRIC convergence uses the package defaults,
+which match the criteria quoted in the paper.
+
+Run:  python HNNH.neo-ccsd.aug-cc-pvdz.pb4f1.aug-cc-pvtz-ri.2026-08-25.inp
+"""
+import numpy as np
+
+from pyscf_neo_cc import neo
+from pyscf_neo_cc import DFCCSD
+from pyscf_neo_cc.df import cd_density_fit_unified
+from pyscf_neo_cc.geomopt import optimize
+from pyscf_neo_cc.scf import use_arh
+
+BOHR_TO_ANGSTROM = 0.529177210903
+
+ATOM = [
+    ['N', (-0.61738946, +0.00007216, +0.00000000)],
+    ['N', (+0.61738946, -0.00007216, +0.00000000)],
+    ['H', (-0.91175194, +0.96588448, +0.00000000)],
+    ['H', (+0.91175194, -0.96588448, +0.00000000)],
+]
+QUANTUM_NUC = [2, 3]
+CHARGE = 0
+
+BASIS = 'aug-cc-pvdz'
+NUC_BASIS = 'pb4f1'
+AUXBASIS_E = 'aug-cc-pvtz-ri'      # ee correlation aux (Cfit)
+JKFIT_AUX_E = 'aug-cc-pvtz-jkfit'     # DF-SCF Fock aux (required for the DF Z-vector)
+
+MAX_STEPS = 100
+TRAJ_FILE = 'HNNH.neo-ccsd.aug-cc-pvdz.pb4f1.aug-cc-pvtz-ri.2026-08-25.traj.xyz'
+
+
+def main():
+    mol = neo.M(atom=ATOM, basis=BASIS, nuc_basis=NUC_BASIS,
+                quantum_nuc=QUANTUM_NUC, charge=CHARGE, unit='Angstrom')
+
+    mf = neo.HF(mol)
+    mf = cd_density_fit_unified(mf,
+                                auxbasis_e=AUXBASIS_E,
+                                jkfit_aux_e=JKFIT_AUX_E,
+                                n_recipe='pavosevic')
+    # ARH is the robust NEO SCF solver; use_arh persists through the
+    # geomeTRIC scanner, so every optimization step converges with ARH.
+    mf = use_arh(mf)
+    mf.kernel()
+
+    mycc = DFCCSD(mf)
+    mol_opt = optimize(mycc, max_steps=MAX_STEPS, traj_file=TRAJ_FILE)
+
+    print('\nOptimized geometry (Angstrom):')
+    for ia in range(mol_opt.natm):
+        sym = mol_opt.atom_symbol(ia)
+        x, y, z = np.asarray(mol_opt.atom_coord(ia)) * BOHR_TO_ANGSTROM
+        print(f'  {sym:<3s} {x:+14.8f} {y:+14.8f} {z:+14.8f}')
+
+    # Relaxed quantum-nucleus position expectation values <r_p> -- the
+    # paper's preferred definition for bond distances and angles.
+    qpos = getattr(mol_opt, 'quantum_nucleus_positions', {})
+    if qpos:
+        print('\nRelaxed <r_p> (Angstrom):')
+        for label in sorted(qpos):
+            r = qpos[label].get('r_relaxed')
+            if r is not None:
+                x, y, z = np.asarray(r) * BOHR_TO_ANGSTROM
+                print(f'  {label:<4s} {x:+14.8f} {y:+14.8f} {z:+14.8f}')
+
+    print(f'\nXYZ trajectory: {TRAJ_FILE}')
+
+
+if __name__ == '__main__':
+    main()
